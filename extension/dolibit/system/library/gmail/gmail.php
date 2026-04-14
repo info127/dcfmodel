@@ -2,47 +2,16 @@
 
 namespace Opencart\System\Library\Extension\Dolibit\Gmail;
 
-/**
- * Gmail API Mailer Library – OpenCart 4.0.2.3
- *
- * Elhelyezés: extension/dolibit/system/library/gmail/gmail.php
- *
- * Regisztrálás (startup controller – már meglévő):
- *   $this->registry->set('gmail', new \Opencart\System\Library\Extension\Dolibit\Gmail\Gmail($this->registry));
- *
- * Küldés bárhol:
- *   $result = $this->gmail->send(
- *       account_id: 1,
- *       to_email:   'recipient@example.com',
- *       subject:    'Tárgy',
- *       text:       'Szöveges törzs'
- *   );
- *   if (isset($result['error'])) { ... }
- *
- * DB tábla kötelező mezői:
- *   account_id    INT PK
- *   client_id     VARCHAR
- *   client_secret VARCHAR
- *   refresh_token VARCHAR
- *   from_email    VARCHAR
- *   from_name     VARCHAR
- */
 class Gmail {
+    protected $registry;
 
-    private object $db;
-
-    /**
-     * DB tábla neve prefix nélkül – igazítsd a valódi táblanévre!
-     */
-    private string $table = 'dolibit_google_account';
-
-    public function __construct(\Opencart\System\Engine\Registry $registry) {
-        $this->db = $registry->get('db');
+    public function __construct($registry) {
+        $this->registry = $registry;
     }
 
-    // ----------------------------------------------------------------
-    // Publikus API
-    // ----------------------------------------------------------------
+    // =========================================================================
+    //  PUBLIKUS API
+    // =========================================================================
 
     /**
      * E-mail küldése Gmail API-n keresztül.
@@ -65,15 +34,11 @@ class Gmail {
         try {
             $account = $this->getAccount($account_id);
 
-            $access_token = $this->fetchAccessToken(
-                $account['client_id'],
-                $account['client_secret'],
-                $account['refresh_token']
-            );
+            $access_token = $this->getAccessToken($account);
 
             $raw = $this->buildRawMessage(
                 $account['from_email'],
-                $from_name ?: $account['from_name'],
+                $from_name ?: ($account['from_name'] ?? $account['name'] ?? ''),
                 $to_email,
                 $subject,
                 $text
@@ -86,35 +51,62 @@ class Gmail {
         }
     }
 
-    // ----------------------------------------------------------------
-    // Privát segédmetódusok
-    // ----------------------------------------------------------------
+    // =========================================================================
+    //  GOOGLE AUTH (belső – gdrive mintájára)
+    // =========================================================================
 
-    private function getAccount(int $account_id): array {
-        $query = $this->db->query(
-            "SELECT * FROM `" . DB_PREFIX . $this->table . "`
-             WHERE `account_id` = '" . (int)$account_id . "'
-             LIMIT 1"
-        );
-
-        if (empty($query->row)) {
-            throw new \Exception(
-                'Gmail account not found: account_id=' . $account_id
-            );
+    private function getAccessToken(array $account): string {
+        if (!$account) {
+            throw new \Exception('Üres account tömb.');
         }
 
-        foreach (['client_id', 'client_secret', 'refresh_token', 'from_email', 'from_name'] as $field) {
-            if (empty($query->row[$field])) {
-                throw new \Exception(
-                    'Gmail account missing field "' . $field . '" for account_id=' . $account_id
-                );
+        if ($account['auth_type'] === 'service_account') {
+            // Gmail API service account csak Google Workspace domain delegation esetén működik.
+            $authFile = DIR_STORAGE . 'google_oauth/' . $account['filename'];
+
+            if (!file_exists($authFile)) {
+                throw new \Exception('Service Account JSON nem található: ' . $authFile);
             }
+
+            $client = new \Google\Client();
+            $client->setAuthConfig($authFile);
+            $client->setScopes([$account['scopes'] ?: 'https://www.googleapis.com/auth/gmail.send']);
+            // Domain-wide delegation esetén szükséges:
+            // $client->setSubject($account['impersonate_email']);
+
+            $token = $client->fetchAccessTokenWithAssertion();
+
+            if (empty($token['access_token'])) {
+                throw new \Exception('Service Account token lekérés sikertelen.');
+            }
+
+            return (string) $token['access_token'];
         }
 
-        return $query->row;
+        // --- OAuth2 flow ---
+
+        if (empty($account['access_token'])) {
+            throw new \Exception('OAuth access_token hiányzik az account_id: ' . ($account['account_id'] ?? '?'));
+        }
+
+        // Ha a tárolt access_token még érvényes (60 mp biztonsági sávval), azt használjuk
+        if (!empty($account['expires_at']) && strtotime($account['expires_at']) > time() + 60) {
+            return (string) $account['access_token'];
+        }
+
+        // Lejárt → refresh_token alapján frissítés (cURL)
+        if (empty($account['refresh_token'])) {
+            throw new \Exception('refresh_token hiányzik az account_id: ' . ($account['account_id'] ?? '?'));
+        }
+
+        return $this->refreshAccessToken(
+            $account['client_id'],
+            $account['client_secret'],
+            $account['refresh_token']
+        );
     }
 
-    private function fetchAccessToken(
+    private function refreshAccessToken(
         string $client_id,
         string $client_secret,
         string $refresh_token
@@ -157,6 +149,10 @@ class Gmail {
         return (string) $data['access_token'];
     }
 
+    // =========================================================================
+    //  GMAIL SEND (belső)
+    // =========================================================================
+
     private function buildRawMessage(
         string $from_email,
         string $from_name,
@@ -176,6 +172,7 @@ class Gmail {
         $raw .= "\r\n";
         $raw .= $encoded_body;
 
+        // Base64url (RFC 4648): +→- /→_ trailing= eltávolítva
         return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
     }
 
@@ -212,5 +209,25 @@ class Gmail {
             'gmail_message_id' => $result['id'] ?? '',
             'gmail_thread_id'  => $result['threadId'] ?? '',
         ];
+    }
+
+    // =========================================================================
+    //  DB (belső)
+    // =========================================================================
+
+    private function getAccount(int $account_id): array {
+        $db = $this->registry->get('db');
+
+        $query = $db->query(
+            "SELECT * FROM `" . DB_PREFIX . "dolibit_google_account`
+             WHERE `account_id` = '" . (int)$account_id . "'
+             LIMIT 1"
+        );
+
+        if (empty($query->row)) {
+            throw new \Exception('Gmail account not found: account_id=' . $account_id);
+        }
+
+        return $query->row;
     }
 }
