@@ -51,6 +51,34 @@ class Gmail {
         }
     }
 
+    /**
+     * Teszt e-mail küldése a fiók saját címére.
+     *
+     * Használat: $this->gmail->testEmail(1);
+     *
+     * @param int $account_id  Google fiók azonosítója az adatbázisban
+     * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
+     */
+    public function testEmail(int $account_id): array {
+        try {
+            $account = $this->getAccount($account_id);
+
+            return $this->send(
+                account_id: $account_id,
+                to_email:   $account['from_email'],
+                subject:    '[TEST] Gmail API – account_id=' . $account_id,
+                text:       "Ez egy automatikus teszt e-mail.\n\n"
+                          . "Account ID : " . $account_id . "\n"
+                          . "From       : " . $account['from_email'] . "\n"
+                          . "Auth type  : " . ($account['auth_type'] ?? 'oauth') . "\n"
+                          . "Időbélyeg  : " . date('Y-m-d H:i:s') . "\n"
+            );
+
+        } catch (\Exception $e) {
+            return ['error' => $e->getMessage()];
+        }
+    }
+
     // =========================================================================
     //  GOOGLE AUTH (belső – gdrive mintájára)
     // =========================================================================
