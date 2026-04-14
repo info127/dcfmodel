@@ -16,11 +16,12 @@ class Gmail {
     /**
      * E-mail küldése Gmail API-n keresztül.
      *
-     * @param int    $account_id  Google fiók azonosítója az adatbázisban
+     * @param int    $account_id  Google fiók azonosítója (doliBIT_gdrive_account.account_id)
      * @param string $to_email    Címzett e-mail cím
      * @param string $subject     Tárgy
      * @param string $text        Törzs (plain text)
-     * @param string $from_name   Opcionális: felülírja a DB-ben tárolt nevet
+     * @param string $from_email  Küldő e-mail cím (nincs DB-ben, kötelező OAuth-hoz)
+     * @param string $from_name   Küldő neve (opcionális, fallback: account.name)
      *
      * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
      */
@@ -29,7 +30,8 @@ class Gmail {
         string $to_email,
         string $subject,
         string $text,
-        string $from_name = ''
+        string $from_email = '',
+        string $from_name  = ''
     ): array {
         try {
             $account = $this->getAccount($account_id);
@@ -37,8 +39,8 @@ class Gmail {
             $access_token = $this->getAccessToken($account);
 
             $raw = $this->buildRawMessage(
-                $account['from_email'],
-                $from_name ?: ($account['from_name'] ?? $account['name'] ?? ''),
+                $from_email,
+                $from_name ?: ($account['name'] ?? ''),
                 $to_email,
                 $subject,
                 $text
@@ -52,26 +54,31 @@ class Gmail {
     }
 
     /**
-     * Teszt e-mail küldése a fiók saját címére.
+     * Teszt e-mail küldése.
      *
-     * Használat: $this->gmail->testEmail(1);
+     * Használat: $this->gmail->testEmail(1, 'info@webdock.hu');
      *
-     * @param int $account_id  Google fiók azonosítója az adatbázisban
-     * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
+     * @param int    $account_id  Google fiók azonosítója
+     * @param string $to_email    Hova menjen a teszt levél
+     * @param string $from_email  Küldő e-mail cím
+     * @return array
      */
-    public function testEmail(int $account_id): array {
+    public function testEmail(int $account_id, string $to_email, string $from_email): array {
         try {
             $account = $this->getAccount($account_id);
 
             return $this->send(
                 account_id: $account_id,
-                to_email:   $account['from_email'],
+                to_email:   $to_email,
                 subject:    '[TEST] Gmail API – account_id=' . $account_id,
                 text:       "Ez egy automatikus teszt e-mail.\n\n"
                           . "Account ID : " . $account_id . "\n"
-                          . "From       : " . $account['from_email'] . "\n"
+                          . "Account    : " . ($account['name'] ?? '') . "\n"
                           . "Auth type  : " . ($account['auth_type'] ?? 'oauth') . "\n"
-                          . "Időbélyeg  : " . date('Y-m-d H:i:s') . "\n"
+                          . "From       : " . $from_email . "\n"
+                          . "To         : " . $to_email . "\n"
+                          . "Időbélyeg  : " . date('Y-m-d H:i:s') . "\n",
+                from_email: $from_email
             );
 
         } catch (\Exception $e) {
@@ -90,14 +97,18 @@ class Gmail {
 
         if ($account['auth_type'] === 'service_account') {
             // Gmail API service account csak Google Workspace domain delegation esetén működik.
-            $authFile = DIR_STORAGE . 'google_oauth/' . $account['filename'];
+            if (empty($account['service_json'])) {
+                throw new \Exception('Service Account JSON hiányzik az account_id: ' . ($account['account_id'] ?? '?'));
+            }
 
-            if (!file_exists($authFile)) {
-                throw new \Exception('Service Account JSON nem található: ' . $authFile);
+            $authConfig = json_decode($account['service_json'], true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new \Exception('Service Account JSON érvénytelen az account_id: ' . ($account['account_id'] ?? '?'));
             }
 
             $client = new \Google\Client();
-            $client->setAuthConfig($authFile);
+            $client->setAuthConfig($authConfig);
             $client->setScopes([$account['scopes'] ?: 'https://www.googleapis.com/auth/gmail.send']);
             // Domain-wide delegation esetén szükséges:
             // $client->setSubject($account['impersonate_email']);
@@ -191,7 +202,12 @@ class Gmail {
         $encoded_subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
         $encoded_body    = chunk_split(base64_encode($text), 76, "\r\n");
 
-        $raw  = 'From: ' . $from_name . ' <' . $from_email . '>' . "\r\n";
+        $raw = '';
+
+        if ($from_email !== '') {
+            $raw .= 'From: ' . $from_name . ' <' . $from_email . '>' . "\r\n";
+        }
+
         $raw .= 'To: ' . $to_email . "\r\n";
         $raw .= 'Subject: ' . $encoded_subject . "\r\n";
         $raw .= 'MIME-Version: 1.0' . "\r\n";
@@ -243,12 +259,20 @@ class Gmail {
     //  DB (belső)
     // =========================================================================
 
+    /**
+     * Account + token JOIN lekérdezés.
+     * Táblák: doliBIT_gdrive_account + doliBIT_gdrive_token
+     */
     private function getAccount(int $account_id): array {
         $db = $this->registry->get('db');
 
         $query = $db->query(
-            "SELECT * FROM `" . DB_PREFIX . "dolibit_google_account`
-             WHERE `account_id` = '" . (int)$account_id . "'
+            "SELECT a.*, t.access_token, t.refresh_token, t.expires_at
+             FROM `"   . DB_PREFIX . "doliBIT_gdrive_account` a
+             LEFT JOIN `" . DB_PREFIX . "doliBIT_gdrive_token` t
+                ON t.account_id = a.account_id
+             WHERE a.account_id = '" . (int)$account_id . "'
+             ORDER BY t.date_modified DESC
              LIMIT 1"
         );
 
