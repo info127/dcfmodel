@@ -256,6 +256,8 @@ class Gmail {
             throw new \Exception('Gmail account not found: account_id=' . $account_id);
         }
 
+        $this->registry->get('log')->write(print_r($query->row, 1));
+
         return $query->row;
     }
 }
