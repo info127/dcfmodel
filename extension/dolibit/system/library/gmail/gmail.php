@@ -16,18 +16,6 @@ class Gmail {
     /**
      * E-mail küldése Gmail API-n keresztül.
      *
-     * @param int    $account_id  Google fiók azonosítója (doliBIT_gdrive_account.account_id)
-     * @param string $to_email    Címzett e-mail cím
-     * @param string $subject     Tárgy
-     * @param string $text        Törzs (plain text)
-     * @param string $from_email  Küldő e-mail cím (nincs DB-ben, kötelező OAuth-hoz)
-     * @param string $from_name   Küldő neve (opcionális, fallback: account.name)
-     *
-     * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
-     */
-    /**
-     * E-mail küldése Gmail API-n keresztül.
-     *
      * Ha $html meg van adva → multipart/alternative (HTML elsődleges, plain fallback).
      * Ha $html üres        → egyszerű text/plain.
      *
