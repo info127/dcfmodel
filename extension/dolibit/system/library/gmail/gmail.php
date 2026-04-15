@@ -54,6 +54,63 @@ class Gmail {
     }
 
     /**
+     * Komplex MIME e-mail küldése előre megépített headers + body alapján.
+     *
+     * Használd ezt, ha a hívó már összerakta a multipart/mixed vagy
+     * multipart/alternative struktúrát (pl. HTML + plain + PDF melléklet).
+     *
+     * A $mime_headers tartalmazhat: MIME-Version, From, Content-Type (boundary).
+     * A To és Subject innen kerül be, NE legyen benne a $mime_headers-ben.
+     *
+     * Használat:
+     *   $result = $this->gmail->sendMime(
+     *       account_id:   8,
+     *       to_email:     $to_email,
+     *       subject:      $subject,
+     *       mime_headers: $headers,
+     *       mime_body:    $email_body
+     *   );
+     *
+     * @param int    $account_id   Google fiók azonosítója
+     * @param string $to_email     Címzett e-mail cím
+     * @param string $subject      Tárgy
+     * @param string $mime_headers Fejléc blokk (From, MIME-Version, Content-Type stb.)
+     * @param string $mime_body    MIME törzs (boundary-s részekkel együtt)
+     *
+     * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
+     */
+    public function sendMime(
+        int    $account_id,
+        string $to_email,
+        string $subject,
+        string $mime_headers,
+        string $mime_body
+    ): array {
+        try {
+            $account = $this->getAccount($account_id);
+
+            $access_token = $this->getAccessToken($account);
+
+            $encoded_subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+
+            // Teljes RFC 2822 üzenet összerakása:
+            // To + Subject előre, utána a hívó által épített fejlécek, majd üres sor, majd törzs
+            $raw_message  = 'To: '      . $to_email        . "\r\n";
+            $raw_message .= 'Subject: ' . $encoded_subject . "\r\n";
+            $raw_message .= rtrim($mime_headers, "\r\n")   . "\r\n";
+            $raw_message .= "\r\n";
+            $raw_message .= $mime_body;
+
+            $encoded = rtrim(strtr(base64_encode($raw_message), '+/', '-_'), '=');
+
+            return $this->dispatchToGmailApi($access_token, $encoded);
+
+        } catch (\Exception $e) {
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    /**
      * Teszt e-mail küldése.
      *
      * Használat: $this->gmail->testEmail(1, 'info@webdock.hu');
