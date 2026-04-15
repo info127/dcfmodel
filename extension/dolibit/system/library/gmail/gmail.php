@@ -25,11 +25,28 @@ class Gmail {
      *
      * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
      */
+    /**
+     * E-mail küldése Gmail API-n keresztül.
+     *
+     * Ha $html meg van adva → multipart/alternative (HTML elsődleges, plain fallback).
+     * Ha $html üres        → egyszerű text/plain.
+     *
+     * @param int    $account_id  Google fiók azonosítója
+     * @param string $to_email    Címzett e-mail cím
+     * @param string $subject     Tárgy
+     * @param string $text        Törzs plain text (kötelező, HTML esetén fallback)
+     * @param string $html        HTML változat (opcionális)
+     * @param string $from_email  Küldő e-mail cím (nincs DB-ben)
+     * @param string $from_name   Küldő neve (opcionális, fallback: account.name)
+     *
+     * @return array{success?: string, gmail_message_id?: string, gmail_thread_id?: string, error?: string}
+     */
     public function send(
         int    $account_id,
         string $to_email,
         string $subject,
         string $text,
+        string $html       = '',
         string $from_email = '',
         string $from_name  = ''
     ): array {
@@ -38,13 +55,26 @@ class Gmail {
 
             $access_token = $this->getAccessToken($account);
 
-            $raw = $this->buildRawMessage(
-                $from_email,
-                $from_name ?: ($account['name'] ?? ''),
-                $to_email,
-                $subject,
-                $text
-            );
+            $sender_name = $from_name ?: ($account['name'] ?? '');
+
+            if ($html !== '') {
+                $raw = $this->buildAlternativeRawMessage(
+                    $from_email,
+                    $sender_name,
+                    $to_email,
+                    $subject,
+                    $text,
+                    $html
+                );
+            } else {
+                $raw = $this->buildRawMessage(
+                    $from_email,
+                    $sender_name,
+                    $to_email,
+                    $subject,
+                    $text
+                );
+            }
 
             return $this->dispatchToGmailApi($access_token, $raw);
 
@@ -248,6 +278,54 @@ class Gmail {
     // =========================================================================
     //  GMAIL SEND (belső)
     // =========================================================================
+
+    /**
+     * multipart/alternative MIME üzenet: plain text (fallback) + HTML (elsődleges).
+     * Az email kliensek az utolsó részt részesítik előnyben → HTML kerül utoljára.
+     */
+    private function buildAlternativeRawMessage(
+        string $from_email,
+        string $from_name,
+        string $to_email,
+        string $subject,
+        string $text,
+        string $html
+    ): string {
+        $boundary        = md5(uniqid('alt_', true));
+        $encoded_subject = '=?UTF-8?B?' . base64_encode($subject) . '?=';
+
+        $raw = '';
+
+        if ($from_email !== '') {
+            $raw .= 'From: ' . $from_name . ' <' . $from_email . '>' . "\r\n";
+        }
+
+        $raw .= 'To: '      . $to_email        . "\r\n";
+        $raw .= 'Subject: ' . $encoded_subject  . "\r\n";
+        $raw .= 'MIME-Version: 1.0'             . "\r\n";
+        $raw .= 'Content-Type: multipart/alternative; boundary="' . $boundary . '"' . "\r\n";
+        $raw .= "\r\n";
+
+        // --- plain text rész (fallback) ---
+        $raw .= '--' . $boundary . "\r\n";
+        $raw .= 'Content-Type: text/plain; charset=UTF-8' . "\r\n";
+        $raw .= 'Content-Transfer-Encoding: base64'       . "\r\n";
+        $raw .= "\r\n";
+        $raw .= chunk_split(base64_encode($text), 76, "\r\n");
+        $raw .= "\r\n";
+
+        // --- HTML rész (elsődleges – utolsó helyen) ---
+        $raw .= '--' . $boundary . "\r\n";
+        $raw .= 'Content-Type: text/html; charset=UTF-8' . "\r\n";
+        $raw .= 'Content-Transfer-Encoding: base64'      . "\r\n";
+        $raw .= "\r\n";
+        $raw .= chunk_split(base64_encode($html), 76, "\r\n");
+        $raw .= "\r\n";
+
+        $raw .= '--' . $boundary . '--';
+
+        return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+    }
 
     private function buildRawMessage(
         string $from_email,
